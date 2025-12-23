@@ -18,6 +18,11 @@ from typing import Any
 
 import portalocker
 
+from analysis.hypothesis.semantic_matcher import (
+    SemanticMatcher,
+    is_duplicate_hypothesis
+)
+
 # ============================================================================
 # Base Concurrent Store
 # ============================================================================
@@ -173,7 +178,29 @@ class Hypothesis:
 
 class HypothesisStore(ConcurrentFileStore):
     """Manages vulnerability hypotheses with concurrent access."""
-    
+
+    def __init__(self, file_path: Path, agent_id: str | None = None):
+        super().__init__(file_path, agent_id)
+
+        # Initialize semantic matcher (lazy load)
+        self._semantic_matcher: SemanticMatcher | None = None
+
+    def _get_semantic_matcher(self) -> SemanticMatcher:
+        """Get or create semantic matcher instance."""
+        if self._semantic_matcher is None:
+            try:
+                self._semantic_matcher = SemanticMatcher(threshold=0.85)
+            except Exception as e:
+                print(f"[!] Failed to initialize semantic matcher: {e}")
+                # Return dummy matcher that never matches
+                class DummyMatcher:
+                    def compute_similarity(self, t1, t2):
+                        return 0.0
+                    threshold = 1.0
+                self._semantic_matcher = DummyMatcher()  # type: ignore
+
+        return self._semantic_matcher
+
     def _get_empty_data(self) -> dict:
         return {
             "version": "1.0",
@@ -186,23 +213,48 @@ class HypothesisStore(ConcurrentFileStore):
         }
     
     def propose(self, hypothesis: Hypothesis) -> tuple[bool, str]:
-        """Propose a new hypothesis with improved duplicate detection."""
+        """Propose a new hypothesis with semantic duplicate detection."""
         def update(data):
             hypotheses = data["hypotheses"]
-            
-            # Duplicate check: keep conservative to allow multiple issues on same nodes
+
+            # Exact title check (keep for performance)
             for h_id, h in hypotheses.items():
-                # Exact title match (case-insensitive)
                 if (h.get("title", "").lower() or "") == hypothesis.title.lower():
                     return data, (False, f"Duplicate title: {h_id}")
-            
+
+            # Semantic duplicate check
+            try:
+                matcher = self._get_semantic_matcher()
+                existing_list = list(hypotheses.values())
+
+                # Convert new hypothesis to dict format
+                new_hyp_dict = {
+                    'title': hypothesis.title,
+                    'node_refs': hypothesis.node_refs
+                }
+
+                is_dup, matched = is_duplicate_hypothesis(
+                    new_hyp_dict,
+                    existing_list,
+                    matcher,
+                    node_overlap_threshold=0.3
+                )
+
+                if is_dup and matched:
+                    matched_id = matched.get('id', 'unknown')
+                    return data, (False, f"Semantic duplicate of {matched_id}")
+            except Exception as e:
+                # If semantic matching fails, fall back to accepting
+                print(f"[!] Semantic matching failed: {e}")
+
+            # Not a duplicate - add it
             hypothesis.created_by = self.agent_id
             hypotheses[hypothesis.id] = asdict(hypothesis)
             data["metadata"]["total"] = len(hypotheses)
             data["metadata"]["last_modified"] = datetime.now().isoformat()
-            
+
             return data, (True, hypothesis.id)
-        
+
         return self.update_atomic(update)
 
     def list_all(self) -> list[dict]:
