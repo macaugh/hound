@@ -75,6 +75,16 @@ models:
     model: gpt-4o
     # No max_context specified - will use global default
 
+# Agent configuration
+agent:
+  # Enable A* search for intelligent exploration (recommended)
+  use_astar_search: true
+
+  # A* heuristic weights (advanced)
+  astar_risk_weight: 0.4
+  astar_info_gain_weight: 0.4
+  astar_revisit_penalty: 0.2
+
 # Global context settings (used when model doesn't specify max_context)
 context:
   max_tokens: 256000           # Default for models without specific max_context
