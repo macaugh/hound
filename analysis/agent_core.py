@@ -164,7 +164,28 @@ class AutonomousAgent:
         except Exception:
             # Keep attribute for conditional checks even if init fails
             self.coverage_index = None
-        
+
+        # Initialize attention-based context filtering (optional feature)
+        self.use_attention = False
+        self.attention_filter = None
+        try:
+            agent_config = (config or {}).get('agent', {})
+            self.use_attention = agent_config.get('use_attention_context', False)
+
+            if self.use_attention:
+                from .context.attention import AttentionScorer, AttentionFilter
+                scorer = AttentionScorer()
+                self.attention_filter = AttentionFilter(
+                    scorer=scorer,
+                    threshold=agent_config.get('attention_threshold', 0.15),
+                    top_k=agent_config.get('attention_top_k')
+                )
+                print(f"[*] Attention-based context filtering enabled (threshold={agent_config.get('attention_threshold', 0.15)})")
+        except Exception as e:
+            print(f"[!] Failed to initialize attention filter: {e}")
+            self.use_attention = False
+            self.attention_filter = None
+
         # Agent's memory - what it has loaded and discovered
         self.loaded_data = {
             'system_graph': None,  # The always-visible system architecture graph
@@ -711,61 +732,59 @@ class AutonomousAgent:
 
     def _build_context(self) -> str:
         """Build complete context for the agent to see.
-        
+
+        With attention filtering enabled: Filters context sections by relevance to investigation goal.
+        Critical sections (goal, steering, hypotheses) are always included.
+
         Permanent context includes:
-        - Investigation goal
+        - Investigation goal (CRITICAL)
+        - User steering notes (CRITICAL)
         - Available graphs list
-        - System architecture graph (always visible)
-        - Memory notes (compressed history)
+        - System architecture graph
+        - Memory notes
         - Recent actions
-        
-        Temporary data (appears only in action history):
-        - Loaded graphs (other than system graph)
-        - Node details and source code
+        - Existing hypotheses (CRITICAL)
         """
         # Refresh hypotheses from store to see updates from other agents
         self._load_existing_hypotheses()
-        
+
         # Reload graphs to see updates from other agents
         self._refresh_loaded_graphs()
-        
-        context_parts = []
-        
-        # Investigation goal
-        context_parts.append("=== INVESTIGATION GOAL ===")
-        context_parts.append(self.investigation_goal)
-        context_parts.append("")
 
-        # User steering notes (if any)
+        # Build context as (label, content) tuples for attention filtering
+        context_sections = []
+
+        # Investigation goal (CRITICAL - always included)
+        goal_content = self.investigation_goal
+        context_sections.append(("INVESTIGATION_GOAL", goal_content))
+
+        # User steering notes (CRITICAL - always included)
         steering = self._read_steering_notes(limit=12)
         if steering:
-            context_parts.append("=== USER STEERING (HONOR THESE) ===")
+            steering_lines = []
             for s in steering:
                 # Add to memory notes lightly if marked as remember/note
                 low = s.lower()
                 if any(k in low for k in ("remember", "note:", "keep in mind")):
                     try:
                         if s not in self._steering_seen:
-                            # Keep latest up to 5 steering memos
                             self.memory_notes.append(f"[STEER] {s[:160]}")
                             self._steering_seen.add(s)
-                            # Bound memory notes size
                             if len(self.memory_notes) > 20:
                                 self.memory_notes = self.memory_notes[-20:]
                     except Exception:
                         pass
-                context_parts.append(f"• {s}")
-            context_parts.append("")
-        
-        # Available graphs (show all)
-        context_parts.append("=== AVAILABLE GRAPHS ===")
-        context_parts.append("Use EXACT graph names as shown below:")
+                steering_lines.append(f"• {s}")
+            context_sections.append(("USER_STEERING", "\n".join(steering_lines)))
+
+        # Available graphs
+        graphs_list = ["Use EXACT graph names as shown below:"]
         for name in self.available_graphs.keys():
             if self.loaded_data['system_graph'] and name == self.loaded_data['system_graph']['name']:
-                context_parts.append(f"• {name} [SYSTEM - AUTO-LOADED, see nodes below]")
+                graphs_list.append(f"• {name} [SYSTEM - AUTO-LOADED, see nodes below]")
             else:
-                context_parts.append(f"• {name}")
-        context_parts.append("")
+                graphs_list.append(f"• {name}")
+        context_sections.append(("AVAILABLE_GRAPHS", "\n".join(graphs_list)))
 
         # A* Search Suggestion (if enabled)
         if self.use_astar_search:
@@ -779,113 +798,114 @@ class AutonomousAgent:
 
         # Compressed memory notes (if any)
         if self.memory_notes:
-            context_parts.append("=== MEMORY (COMPRESSED HISTORY) ===")
-            for note in self.memory_notes[-5:]:
-                context_parts.append(f"• {note}")
-            context_parts.append("")
-        
-        # System graph - ALWAYS VISIBLE with ALL NODES/EDGES (compact)
+            memory_lines = [f"• {note}" for note in self.memory_notes[-5:]]
+            context_sections.append(("MEMORY", "\n".join(memory_lines)))
+
+        # System graph
         if self.loaded_data['system_graph']:
-            context_parts.append("=== SYSTEM ARCHITECTURE (ALWAYS VISIBLE) ===")
             graph_name = self.loaded_data['system_graph']['name']
             graph_data = self.loaded_data['system_graph']['data']
-            # Use unified formatting function
-            context_parts.extend(self._format_graph_for_display(graph_data, graph_name))
-        context_parts.append("")
+            graph_lines = self._format_graph_for_display(graph_data, graph_name)
+            context_sections.append(("SYSTEM_ARCHITECTURE", "\n".join(graph_lines)))
 
-        # Include any additionally loaded graphs in compact full form
+        # Additional loaded graphs
         if self.loaded_data.get('graphs'):
             for gname, gdata in self.loaded_data['graphs'].items():
-                context_parts.append(f"=== GRAPH LOADED: {gname} ===")
-                context_parts.extend(self._format_graph_for_display(gdata, gname))
-                context_parts.append("")
+                graph_lines = self._format_graph_for_display(gdata, gname)
+                context_sections.append((f"GRAPH_{gname}", "\n".join(graph_lines)))
 
-        # List currently loaded nodes to prevent reloading
+        # Loaded nodes
         if self.loaded_data.get('nodes'):
-            context_parts.append("=== LOADED NODES (CACHE — DO NOT RELOAD) ===")
             node_ids = list(self.loaded_data['nodes'].keys())
-            # Print compact lists in lines of ~10
+            lines = []
             line = []
             for i, nid in enumerate(node_ids, 1):
                 line.append(nid)
                 if (i % 10) == 0:
-                    context_parts.append('  ' + ','.join(line))
+                    lines.append('  ' + ','.join(line))
                     line = []
             if line:
-                context_parts.append('  ' + ','.join(line))
-            context_parts.append("")
-        
-        # Actions performed (recent) - summary only since full data is in RECENT ACTIONS
+                lines.append('  ' + ','.join(line))
+            context_sections.append(("LOADED_NODES", "\n".join(lines)))
+
+        # Actions performed
         if self.action_log:
-            context_parts.append("=== ACTIONS PERFORMED (SUMMARY) ===")
+            actions = []
             for entry in self.action_log[-10:]:
                 act = entry.get('action','-')
                 r = entry.get('result','')
-                # Just show action and brief result summary
-                if isinstance(r, str):
-                    rs = r[:100]
-                else:
-                    rs = str(r)[:100]
-                context_parts.append(f"- {act}: {rs}")
-            context_parts.append("")
+                rs = str(r)[:100] if not isinstance(r, str) else r[:100]
+                actions.append(f"- {act}: {rs}")
+            context_sections.append(("ACTIONS_SUMMARY", "\n".join(actions)))
 
-        # Current hypotheses (ALWAYS show, display clearly to prevent duplicates)
-        context_parts.append("=== EXISTING HYPOTHESES (DO NOT DUPLICATE!) ===")
+        # Hypotheses (CRITICAL - always included)
+        hyp_lines = []
         if self.loaded_data['hypotheses']:
-            # Group by vulnerability type to make duplicates obvious
             by_type = {}
             for hyp in self.loaded_data['hypotheses']:
                 vtype = hyp.get('vulnerability_type', 'unknown')
-                if vtype not in by_type:
-                    by_type[vtype] = []
-                by_type[vtype].append(hyp)
-            
+                by_type.setdefault(vtype, []).append(hyp)
+
             for vtype, hyps in by_type.items():
-                context_parts.append(f"\n{vtype.upper()}:")
+                hyp_lines.append(f"\n{vtype.upper()}:")
                 for hyp in hyps:
                     status = hyp.get('status', 'proposed')
                     conf = hyp['confidence']
-                    # Show full title and affected nodes to prevent duplicates
-                    if status == 'confirmed':
-                        icon = '✓'
-                    elif status == 'rejected':
-                        icon = '✗'
-                    elif status == 'supported':
-                        icon = '+'
-                    elif status == 'refuted':
-                        icon = '-'
-                    else:
-                        icon = '?'
-                    
+                    icon = {'confirmed':'✓', 'rejected':'✗', 'supported':'+', 'refuted':'-'}.get(status, '?')
                     nodes = hyp.get('node_ids', [])
                     nodes_str = ','.join(nodes[:3]) if nodes else 'unknown'
                     title = hyp.get('title', hyp['description'][:60])
-                    
-                    # Single compact line per hypothesis with clear info
-                    context_parts.append(f"  [{icon}] {conf:.0%} @{nodes_str}: {title}")
+                    hyp_lines.append(f"  [{icon}] {conf:.0%} @{nodes_str}: {title}")
         else:
-            context_parts.append("None")
-        context_parts.append("")
-        
-        # Recent actions (for context awareness)
-        # Show ALL conversation history (compression will handle size limits)
+            hyp_lines.append("None")
+        context_sections.append(("EXISTING_HYPOTHESES", "\n".join(hyp_lines)))
+
+        # Recent actions
         if len(self.conversation_history) > 1:
-            context_parts.append("=== RECENT ACTIONS ===")
-            # Show all entries - compression handles size management
+            recent = []
             for entry in self.conversation_history:
                 if entry['role'] == 'assistant':
-                    context_parts.append(f"Action: {entry['content']}")
+                    recent.append(f"Action: {entry['content']}")
                 elif entry['role'] == 'system':
-                    # Include full result for system responses (contains graph/node data)
                     content = entry['content']
-                    # Mark compressed entries clearly
                     if content.startswith('[MEMORY]'):
-                        context_parts.append(f"===== COMPRESSED HISTORY =====\n{content}")
+                        recent.append(f"===== COMPRESSED HISTORY =====\n{content}")
                     else:
-                        context_parts.append(f"Result: {content}")
-            context_parts.append("")
-        
-        return '\n'.join(context_parts)
+                        recent.append(f"Result: {content}")
+            context_sections.append(("RECENT_ACTIONS", "\n".join(recent)))
+
+        # Apply attention filtering if enabled
+        if self.use_attention and self.attention_filter:
+            critical_labels = {"INVESTIGATION_GOAL", "USER_STEERING", "EXISTING_HYPOTHESES"}
+
+            filtered_sections = self.attention_filter.filter_contexts(
+                query=self.investigation_goal,
+                contexts=context_sections,
+                critical_labels=critical_labels
+            )
+
+            # Log filtering results
+            filtered_count = len(context_sections) - len(filtered_sections)
+            if filtered_count > 0:
+                print(f"[ATTENTION] Filtered {filtered_count}/{len(context_sections)} context sections (low relevance)")
+
+            # Build final context from filtered sections
+            final_parts = []
+            for label, content, score in filtered_sections:
+                final_parts.append(f"=== {label} ===")
+                final_parts.append(content)
+                final_parts.append("")
+
+            return '\n'.join(final_parts)
+        else:
+            # No attention filtering - use all sections
+            final_parts = []
+            for label, content in context_sections:
+                final_parts.append(f"=== {label} ===")
+                final_parts.append(content)
+                final_parts.append("")
+
+            return '\n'.join(final_parts)
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using accurate tokenization when available."""
