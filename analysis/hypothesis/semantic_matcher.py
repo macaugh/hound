@@ -89,3 +89,65 @@ class SemanticMatcher:
                 return True, existing_text
 
         return False, None
+
+
+def compute_node_overlap(nodes1: list[str], nodes2: list[str]) -> float:
+    """Compute Jaccard similarity between two node lists.
+
+    Args:
+        nodes1: First node list
+        nodes2: Second node list
+
+    Returns:
+        Overlap ratio (0-1)
+    """
+    if not nodes1 or not nodes2:
+        return 0.0
+
+    set1 = set(nodes1)
+    set2 = set(nodes2)
+
+    intersection = len(set1 & set2)
+    union = len(set1 | set2)
+
+    if union == 0:
+        return 0.0
+
+    return intersection / union
+
+
+def is_duplicate_hypothesis(new_hyp: dict,
+                            existing_hyps: list[dict],
+                            matcher: SemanticMatcher,
+                            node_overlap_threshold: float = 0.3) -> tuple[bool, dict | None]:
+    """Check if hypothesis is duplicate considering both text and nodes.
+
+    Args:
+        new_hyp: New hypothesis dict with 'title' and 'node_refs'
+        existing_hyps: List of existing hypothesis dicts
+        matcher: SemanticMatcher instance
+        node_overlap_threshold: Minimum node overlap to consider (0-1)
+
+    Returns:
+        Tuple of (is_duplicate, matched_hypothesis)
+    """
+    new_title = new_hyp.get('title', '')
+    new_nodes = new_hyp.get('node_refs', [])
+
+    for existing in existing_hyps:
+        existing_title = existing.get('title', '')
+        existing_nodes = existing.get('node_refs', [])
+
+        # Compute text similarity
+        text_sim = matcher.compute_similarity(new_title, existing_title)
+
+        # Compute node overlap
+        node_overlap = compute_node_overlap(new_nodes, existing_nodes)
+
+        # Duplicate if BOTH conditions met:
+        # 1. High text similarity (above threshold)
+        # 2. Significant node overlap (above threshold)
+        if text_sim >= matcher.threshold and node_overlap >= node_overlap_threshold:
+            return True, existing
+
+    return False, None

@@ -46,3 +46,49 @@ def test_semantic_matcher_different_vulnerabilities():
 
     # Should be low similarity - different issues
     assert similarity < 0.50
+
+
+def test_semantic_matcher_with_node_overlap():
+    """Test that node overlap is considered in duplicate detection."""
+    from analysis.hypothesis.semantic_matcher import is_duplicate_hypothesis
+
+    # New hypothesis
+    new_hyp = {
+        'title': 'Missing access control in transfer',
+        'node_refs': ['func_transfer', 'func_validate']
+    }
+
+    # Existing hypothesis - similar text, overlapping nodes
+    existing1 = {
+        'title': 'Authorization bypass in transfer function',
+        'node_refs': ['func_transfer', 'func_authorize']  # 50% overlap
+    }
+
+    # Existing hypothesis - similar text, NO overlapping nodes
+    existing2 = {
+        'title': 'Missing authorization in withdrawal',
+        'node_refs': ['func_withdraw', 'func_check']  # 0% overlap
+    }
+
+    matcher = SemanticMatcher(threshold=0.67)  # Lower threshold for testing
+
+    # Should be duplicate due to high similarity AND node overlap
+    is_dup1, _ = is_duplicate_hypothesis(new_hyp, [existing1], matcher)
+    assert is_dup1 is True
+
+    # Should NOT be duplicate - different nodes despite similar text
+    is_dup2, _ = is_duplicate_hypothesis(new_hyp, [existing2], matcher)
+    assert is_dup2 is False
+
+
+def test_semantic_matcher_node_overlap_calculation():
+    """Test node overlap calculation."""
+    from analysis.hypothesis.semantic_matcher import compute_node_overlap
+
+    nodes1 = ['a', 'b', 'c']
+    nodes2 = ['b', 'c', 'd']
+
+    overlap = compute_node_overlap(nodes1, nodes2)
+
+    # Overlap = intersection / union = 2 / 4 = 0.5
+    assert overlap == pytest.approx(0.5, abs=0.01)
