@@ -72,3 +72,49 @@ def test_unrelated_query_and_context_scores_low():
     # Should be significantly lower than high-similarity scores (>0.9)
     assert all(0.4 < score < 0.6 for score in scores)  # Baseline range
     assert all(score < 0.7 for score in scores)  # Clearly not similar
+
+
+def test_encoding_cache_reduces_computation():
+    """Cache should store encodings and reuse them for repeated text."""
+    from analysis.context.attention import AttentionScorer
+    from unittest.mock import patch
+
+    scorer = AttentionScorer()
+    query = "Check for reentrancy vulnerabilities"
+    context1 = "Transfer function allows reentrancy"
+    context2 = "Helper function validates input"
+
+    # First call should encode all unique texts
+    with patch.object(scorer.model, 'encode', wraps=scorer.model.encode) as mock_encode:
+        scorer.compute_attention_scores(query, [context1, context2])
+
+        # Should encode query once + 2 unique contexts
+        assert mock_encode.call_count == 3
+
+    # Second call with same texts should use cache
+    with patch.object(scorer.model, 'encode', wraps=scorer.model.encode) as mock_encode:
+        scorer.compute_attention_scores(query, [context1, context2])
+
+        # Should not encode anything (all cached)
+        assert mock_encode.call_count == 0
+
+
+def test_cache_eviction_at_limit():
+    """Cache should evict old items when exceeding size limit."""
+    from analysis.context.attention import AttentionScorer
+
+    scorer = AttentionScorer()
+
+    # Fill cache to limit (500 items)
+    for i in range(500):
+        text = f"Test text number {i}"
+        scorer.compute_attention_scores(text, [text])
+
+    # Cache should be at limit
+    assert len(scorer._cache) == 500
+
+    # Add one more unique item
+    scorer.compute_attention_scores("New unique text", ["Another unique text"])
+
+    # Cache should still be at limit (evicted oldest)
+    assert len(scorer._cache) <= 500
