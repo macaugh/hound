@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover
     ConfigDict = None  # type: ignore
 
 from .concurrent_knowledge import GraphStore
+from .search.astar import AStarSearch, SecurityHeuristic
 
 
 class AgentParameters(BaseModel):
@@ -212,7 +213,19 @@ class AutonomousAgent:
         
         # Load existing hypotheses from persistent store
         self._load_existing_hypotheses()
-        
+
+        # Initialize A* search if enabled
+        try:
+            agent_config = (config or {}).get('agent', {})
+            self.use_astar_search = agent_config.get('use_astar_search', False)
+
+            if self.use_astar_search:
+                self.astar_search = AStarSearch(heuristic=SecurityHeuristic())
+                print(f"[*] A* search enabled for intelligent exploration")
+        except Exception:
+            self.use_astar_search = False
+            self.astar_search = None
+
         # Conversation history for context
         self.conversation_history = []
         # Compressed memory notes
@@ -373,7 +386,63 @@ class AutonomousAgent:
             #     print(f"[*] Loaded {len(self.loaded_data['hypotheses'])} existing hypotheses")
         except Exception as e:
             print(f"[!] Failed to load existing hypotheses: {e}")
-    
+
+    def _get_astar_suggestion(self) -> dict[str, Any] | None:
+        """Use A* search to suggest next node to explore.
+
+        Returns:
+            Dict with node_id, priority, reasoning or None if no suggestion
+        """
+        if not self.use_astar_search or not self.astar_search:
+            return None
+
+        # Get current graph
+        graph_data = None
+        if self.loaded_data.get('system_graph'):
+            graph_data = self.loaded_data['system_graph']['data']
+        elif self.loaded_data.get('graphs'):
+            # Use first loaded graph
+            graph_data = list(self.loaded_data['graphs'].values())[0]
+
+        if not graph_data:
+            return None
+
+        # Get already-visited nodes
+        visited = set(self.loaded_data.get('nodes', {}).keys())
+
+        # Find a starting point (use first unvisited node)
+        all_nodes = {n['id'] for n in graph_data.get('nodes', [])}
+        unvisited = all_nodes - visited
+
+        if not unvisited:
+            return None
+
+        start_node = next(iter(unvisited))
+
+        # Run A* search
+        path = self.astar_search.search(
+            start_node=start_node,
+            graph_data=graph_data,
+            max_steps=10
+        )
+
+        if not path or len(path) < 2:
+            return None
+
+        # Suggest first unvisited node in path
+        for node_id in path:
+            if node_id not in visited:
+                # Get node data
+                node = next((n for n in graph_data['nodes'] if n['id'] == node_id), None)
+                if node:
+                    return {
+                        'node_id': node_id,
+                        'priority': 'high',
+                        'reasoning': f"A* search suggests {node_id} ({node.get('label', 'unknown')}) as high-priority based on security heuristics"
+                    }
+
+        return None
+
     def _refresh_loaded_graphs(self):
         """Refresh loaded graphs from disk to see updates from other agents."""
         try:
@@ -717,7 +786,17 @@ class AutonomousAgent:
                 graphs_list.append(f"• {name}")
         context_sections.append(("AVAILABLE_GRAPHS", "\n".join(graphs_list)))
 
-        # Memory notes
+        # A* Search Suggestion (if enabled)
+        if self.use_astar_search:
+            suggestion = self._get_astar_suggestion()
+            if suggestion:
+                context_parts.append("=== A* SEARCH RECOMMENDATION ===")
+                context_parts.append(f"HIGH PRIORITY: {suggestion['node_id']}")
+                context_parts.append(f"Reasoning: {suggestion['reasoning']}")
+                context_parts.append("Consider investigating this node next to maximize security impact.")
+                context_parts.append("")
+
+        # Compressed memory notes (if any)
         if self.memory_notes:
             memory_lines = [f"• {note}" for note in self.memory_notes[-5:]]
             context_sections.append(("MEMORY", "\n".join(memory_lines)))
