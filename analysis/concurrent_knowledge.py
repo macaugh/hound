@@ -19,7 +19,9 @@ from typing import Any
 import portalocker
 
 from analysis.hypothesis.semantic_matcher import (
+    DummyMatcher,
     SemanticMatcher,
+    SimilarityMatcher,
     is_duplicate_hypothesis
 )
 
@@ -183,21 +185,17 @@ class HypothesisStore(ConcurrentFileStore):
         super().__init__(file_path, agent_id)
 
         # Initialize semantic matcher (lazy load)
-        self._semantic_matcher: SemanticMatcher | None = None
+        self._semantic_matcher: SimilarityMatcher | None = None
 
-    def _get_semantic_matcher(self) -> SemanticMatcher:
+    def _get_semantic_matcher(self) -> SimilarityMatcher:
         """Get or create semantic matcher instance."""
         if self._semantic_matcher is None:
             try:
                 self._semantic_matcher = SemanticMatcher(threshold=0.85)
             except Exception as e:
                 print(f"[!] Failed to initialize semantic matcher: {e}")
-                # Return dummy matcher that never matches
-                class DummyMatcher:
-                    def compute_similarity(self, t1, t2):
-                        return 0.0
-                    threshold = 1.0
-                self._semantic_matcher = DummyMatcher()  # type: ignore
+                # Use dummy matcher that never matches (graceful degradation)
+                self._semantic_matcher = DummyMatcher()
 
         return self._semantic_matcher
 

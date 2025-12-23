@@ -1,9 +1,21 @@
 """Semantic similarity matching for hypothesis deduplication."""
 from __future__ import annotations
 
+import threading
+from typing import Protocol
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+
+
+class SimilarityMatcher(Protocol):
+    """Protocol for semantic similarity matchers."""
+    threshold: float
+
+    def compute_similarity(self, text1: str, text2: str) -> float:
+        """Compute similarity between two texts."""
+        ...
 
 
 class SemanticMatcher:
@@ -21,6 +33,7 @@ class SemanticMatcher:
         self.model = SentenceTransformer(model_name)
         self.threshold = threshold
         self._cache: dict[str, np.ndarray] = {}  # Cache embeddings
+        self._cache_lock = threading.Lock()  # Thread-safe cache access
 
     def compute_similarity(self, text1: str, text2: str) -> float:
         """Compute cosine similarity between two text strings.
@@ -46,17 +59,26 @@ class SemanticMatcher:
 
     def _get_embedding(self, text: str) -> np.ndarray:
         """Get embedding for text, using cache if available."""
-        if text in self._cache:
-            return self._cache[text]
+        # Check cache with lock
+        with self._cache_lock:
+            if text in self._cache:
+                return self._cache[text]
 
+        # Compute embedding outside lock (expensive operation)
         embedding = self.model.encode(text, convert_to_numpy=True)
-        self._cache[text] = embedding
 
-        # Limit cache size
-        if len(self._cache) > 1000:
-            # Remove oldest entry (FIFO)
-            oldest = next(iter(self._cache))
-            del self._cache[oldest]
+        # Update cache with lock
+        with self._cache_lock:
+            self._cache[text] = embedding
+
+            # Limit cache size - evict to 80% capacity when exceeding limit
+            if len(self._cache) > 1000:
+                target_size = 800
+                to_remove = len(self._cache) - target_size
+                for _ in range(to_remove):
+                    # Remove oldest entry (FIFO - dicts maintain insertion order)
+                    oldest = next(iter(self._cache))
+                    del self._cache[oldest]
 
         return embedding
 
@@ -151,3 +173,12 @@ def is_duplicate_hypothesis(new_hyp: dict,
             return True, existing
 
     return False, None
+
+
+class DummyMatcher:
+    """Fallback matcher that never matches (for graceful degradation)."""
+    threshold: float = 1.0  # Set impossibly high threshold
+
+    def compute_similarity(self, text1: str, text2: str) -> float:
+        """Always return 0.0 similarity."""
+        return 0.0
