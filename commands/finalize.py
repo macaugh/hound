@@ -168,10 +168,17 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
     from llm.unified_client import UnifiedLLMClient
     llm = UnifiedLLMClient(cfg=config, profile="finalize", debug_logger=debug_logger)
 
-    # Initialize validation modules
-    permission_tracer = PermissionTracer()
-    impact_classifier = ImpactClassifier()
-    pattern_matcher = FalsePositivePatternMatcher()
+    # Load validation configuration
+    validation_config = config.get('validation', {})
+    enable_permission = validation_config.get('enable_permission_analysis', True)
+    enable_impact = validation_config.get('enable_impact_classification', True)
+    enable_patterns = validation_config.get('enable_pattern_matching', True)
+    disqualify_rules = validation_config.get('disqualify_on', {})
+
+    # Initialize validation modules (only if enabled)
+    permission_tracer = PermissionTracer() if enable_permission else None
+    impact_classifier = ImpactClassifier() if enable_impact else None
+    pattern_matcher = FalsePositivePatternMatcher() if enable_patterns else None
 
     # No pre-filtering, proceed directly to review
     
@@ -366,37 +373,43 @@ Be conservative - only confirm if the code clearly shows the vulnerability.
                 # If code review confirms, run additional validation stages
                 validation_rejection = None
                 if result.verdict == "confirmed":
-                    # Stage 1: Permission Analysis
+                    # Stage 1: Permission Analysis (if enabled)
                     perm_result = None
-                    try:
-                        perm_result = permission_tracer.analyze_permissions(hypothesis, source_code)
-                        if perm_result['disqualifying']:
-                            validation_rejection = {
-                                'stage': 'Permission Analysis',
-                                'reason': f"Admin-only trigger: {perm_result['reasoning']}",
-                                'pattern': 'admin_footgun'
-                            }
-                    except Exception as e:
-                        if debug:
-                            progress.console.print(f"  [yellow]Permission analysis error: {e}[/yellow]")
+                    if permission_tracer and enable_permission:
+                        try:
+                            perm_result = permission_tracer.analyze_permissions(hypothesis, source_code)
+                            if perm_result['disqualifying'] and disqualify_rules.get('admin_only', True):
+                                validation_rejection = {
+                                    'stage': 'Permission Analysis',
+                                    'reason': f"Admin-only trigger: {perm_result['reasoning']}",
+                                    'pattern': 'admin_footgun'
+                                }
+                        except Exception as e:
+                            if debug:
+                                progress.console.print(f"  [yellow]Permission analysis error: {e}[/yellow]")
 
-                    # Stage 2: Impact Classification
+                    # Stage 2: Impact Classification (if enabled)
                     impact_result = None
-                    if not validation_rejection:
+                    if impact_classifier and enable_impact and not validation_rejection:
                         try:
                             impact_result = impact_classifier.classify(hypothesis)
-                            if impact_result['disqualifying']:
+                            category = impact_result['category']
+                            should_disqualify = (
+                                (category == 'compatibility' and disqualify_rules.get('compatibility_issue', True)) or
+                                (category == 'quality' and disqualify_rules.get('quality_issue', True))
+                            )
+                            if impact_result['disqualifying'] and should_disqualify:
                                 validation_rejection = {
                                     'stage': 'Impact Classification',
-                                    'reason': f"{impact_result['category'].title()} issue: {impact_result['reasoning']}",
-                                    'pattern': impact_result['category']
+                                    'reason': f"{category.title()} issue: {impact_result['reasoning']}",
+                                    'pattern': category
                                 }
                         except Exception as e:
                             if debug:
                                 progress.console.print(f"  [yellow]Impact classification error: {e}[/yellow]")
 
-                    # Stage 3: Pattern Matching
-                    if not validation_rejection:
+                    # Stage 3: Pattern Matching (if enabled)
+                    if pattern_matcher and enable_patterns and not validation_rejection:
                         try:
                             # Build analysis context
                             analysis_context = {
@@ -404,7 +417,7 @@ Be conservative - only confirm if the code clearly shows the vulnerability.
                                 'impact_category': impact_result.get('category', 'unknown') if impact_result else 'unknown'
                             }
                             pattern_result = pattern_matcher.match(hypothesis, analysis_context)
-                            if pattern_result['disqualifying']:
+                            if pattern_result['disqualifying'] and disqualify_rules.get('matched_pattern', True):
                                 validation_rejection = {
                                     'stage': 'Pattern Matching',
                                     'reason': f"Matched false positive pattern: {', '.join(pattern_result['matches'])}",

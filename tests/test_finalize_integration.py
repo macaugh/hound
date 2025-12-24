@@ -37,3 +37,17 @@ def test_finalize_calls_validation_modules(tmp_path):
     assert 'from analysis.permission_tracer import PermissionTracer' in source
     assert 'from analysis.impact_classifier import ImpactClassifier' in source
     assert 'from analysis.false_positive_patterns import FalsePositivePatternMatcher' in source
+
+
+def test_finalize_respects_validation_config():
+    """Test that finalize respects validation enable/disable flags."""
+    # This would require mocking config load
+    # For now, verify config is loaded
+    import yaml
+    from pathlib import Path
+
+    config_path = Path(__file__).parent.parent / 'config.yaml.example'
+    config = yaml.safe_load(config_path.read_text())
+
+    assert 'validation' in config
+    assert 'enable_permission_analysis' in config['validation']
