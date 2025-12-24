@@ -99,6 +99,28 @@ retries:
   backoff_min_seconds: 1
   backoff_max_seconds: 2
 
+# Validation Framework Configuration
+validation:
+  # Enable/disable validation stages
+  enable_permission_analysis: true
+  enable_impact_classification: true
+  enable_pattern_matching: true
+  enable_poc_execution: false  # Future feature, opt-in for security
+
+  # Pattern matching configuration
+  false_positive_patterns:
+    - admin_footgun
+    - sybil_resistance
+    - mathematical_noise
+    - design_limitation
+
+  # Disqualification rules
+  disqualify_on:
+    admin_only: true              # Reject if only admin can trigger
+    compatibility_issue: true      # Reject compatibility issues
+    quality_issue: true            # Reject code quality issues
+    matched_pattern: true          # Reject if matches false positive pattern
+
 # Notes:
 # - Each model can have its own max_context setting
 # - Graph model uses large context for building iterations (sees more code)
