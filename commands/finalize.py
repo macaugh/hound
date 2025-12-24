@@ -280,6 +280,36 @@ Description: {hypothesis.get('description', '')}
 === YOUR TASK ===
 Review the SOURCE CODE to determine if this hypothesis represents a REAL vulnerability.
 
+VALIDATION CHECKLIST:
+1. ROOT CAUSE: Is the root cause explicitly present in the code?
+   - Can you point to specific lines showing the vulnerability?
+   - Or is this theoretical/assumed behavior?
+
+2. GUARDS: Are there require/modifier/permission checks that prevent exploitation?
+   - Check for: require(), modifiers (onlyOwner, onlyAdmin), access control
+   - Look for: enforceIsContractOwner(), msg.sender checks, role checks
+
+3. PRECONDITIONS: Can the preconditions actually occur in practice?
+   - Are the preconditions realistic or contrived?
+   - What would an attacker need to achieve these preconditions?
+
+4. MITIGATIONS: Are there architectural patterns that mitigate this?
+   - Reentrancy guards?
+   - Checks-effects-interactions pattern?
+   - Time locks or multi-sig requirements?
+
+5. PERMISSION REQUIREMENTS: Who can trigger this?
+   - Anyone (public/external)?
+   - Only specific users?
+   - Only admin/owner?
+   - **NOTE**: If only admin can trigger, this is likely an "admin foot-gun", not a vulnerability
+
+6. IMPACT TYPE: What is the real impact?
+   - Security (theft, loss, unauthorized access)?
+   - Compatibility (doesn't work for some users)?
+   - Quality (dust-level precision loss, gas optimization)?
+   - **NOTE**: Compatibility and quality issues are not security vulnerabilities
+
 Focus on:
 1. Does the SOURCE CODE show the vulnerability exists?
 2. Is there a clear attack vector in the code?
