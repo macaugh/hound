@@ -15,6 +15,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from analysis.concurrent_knowledge import HypothesisStore
+from analysis.permission_tracer import PermissionTracer
+from analysis.impact_classifier import ImpactClassifier
+from analysis.false_positive_patterns import FalsePositivePatternMatcher
 from commands.project import ProjectManager
 
 console = Console()
@@ -164,7 +167,12 @@ def finalize(project_name: str, threshold: float, include_below_threshold: bool,
     # Initialize LLM for finalization
     from llm.unified_client import UnifiedLLMClient
     llm = UnifiedLLMClient(cfg=config, profile="finalize", debug_logger=debug_logger)
-    
+
+    # Initialize validation modules
+    permission_tracer = PermissionTracer()
+    impact_classifier = ImpactClassifier()
+    pattern_matcher = FalsePositivePatternMatcher()
+
     # No pre-filtering, proceed directly to review
     
     # Load manifest for source code access
@@ -354,8 +362,67 @@ Be conservative - only confirm if the code clearly shows the vulnerability.
                     if debug:
                         progress.console.print(f"  [red]LLM error: {e}[/red]")
                     result = ReviewResult(verdict='uncertain', reasoning='LLM error')
-                
-                # Apply verdict
+
+                # If code review confirms, run additional validation stages
+                validation_rejection = None
+                if result.verdict == "confirmed":
+                    # Stage 1: Permission Analysis
+                    perm_result = None
+                    try:
+                        perm_result = permission_tracer.analyze_permissions(hypothesis, source_code)
+                        if perm_result['disqualifying']:
+                            validation_rejection = {
+                                'stage': 'Permission Analysis',
+                                'reason': f"Admin-only trigger: {perm_result['reasoning']}",
+                                'pattern': 'admin_footgun'
+                            }
+                    except Exception as e:
+                        if debug:
+                            progress.console.print(f"  [yellow]Permission analysis error: {e}[/yellow]")
+
+                    # Stage 2: Impact Classification
+                    impact_result = None
+                    if not validation_rejection:
+                        try:
+                            impact_result = impact_classifier.classify(hypothesis)
+                            if impact_result['disqualifying']:
+                                validation_rejection = {
+                                    'stage': 'Impact Classification',
+                                    'reason': f"{impact_result['category'].title()} issue: {impact_result['reasoning']}",
+                                    'pattern': impact_result['category']
+                                }
+                        except Exception as e:
+                            if debug:
+                                progress.console.print(f"  [yellow]Impact classification error: {e}[/yellow]")
+
+                    # Stage 3: Pattern Matching
+                    if not validation_rejection:
+                        try:
+                            # Build analysis context
+                            analysis_context = {
+                                'trigger_level': perm_result.get('trigger_level', 'unknown') if perm_result else 'unknown',
+                                'impact_category': impact_result.get('category', 'unknown') if impact_result else 'unknown'
+                            }
+                            pattern_result = pattern_matcher.match(hypothesis, analysis_context)
+                            if pattern_result['disqualifying']:
+                                validation_rejection = {
+                                    'stage': 'Pattern Matching',
+                                    'reason': f"Matched false positive pattern: {', '.join(pattern_result['matches'])}",
+                                    'pattern': pattern_result['matches'][0] if pattern_result['matches'] else 'unknown'
+                                }
+                        except Exception as e:
+                            if debug:
+                                progress.console.print(f"  [yellow]Pattern matching error: {e}[/yellow]")
+
+                # Apply verdict (considering validation rejection)
+                if validation_rejection:
+                    # Override to rejected based on validation
+                    result = ReviewResult(
+                        verdict='rejected',
+                        reasoning=f"[{validation_rejection['stage']}] {validation_rejection['reason']}",
+                        confidence=0.8
+                    )
+
                 if result.verdict == "confirmed":
                     # Mark as confirmed
                     store.adjust_confidence(hid, 1.0, result.reasoning)
@@ -381,17 +448,25 @@ Be conservative - only confirm if the code clearly shows the vulnerability.
                 elif result.verdict == "rejected":
                     # Mark as rejected
                     store.adjust_confidence(hid, 0.0, result.reasoning)
-                    
+
                     # Update status to rejected
                     def update_status(data):
                         if hid in data["hypotheses"]:
                             data["hypotheses"][hid]["status"] = "rejected"
+                            # Store validation rejection details if available
+                            if validation_rejection:
+                                data["hypotheses"][hid]["rejection_stage"] = validation_rejection['stage']
+                                data["hypotheses"][hid]["rejection_pattern"] = validation_rejection['pattern']
                         return data, True
-                    
+
                     store.update_atomic(update_status)
                     rejected += 1
-                    
+
+                    # Enhanced output showing validation stage
                     progress.console.print(f"  [red]✗ REJECTED:[/red] {hypothesis.get('title', '')[:60]}")
+                    if validation_rejection:
+                        progress.console.print(f"    [bold magenta]Stage:[/bold magenta] {validation_rejection['stage']}")
+                        progress.console.print(f"    [bold magenta]Pattern:[/bold magenta] {validation_rejection['pattern']}")
                     if result.reasoning:
                         # Always show justification for rejected findings
                         progress.console.print(f"    [bold yellow]Reason:[/bold yellow] {result.reasoning}")
@@ -418,7 +493,22 @@ Be conservative - only confirm if the code clearly shows the vulnerability.
     console.print(f"  [red]✗ Rejected:[/red] {rejected}")
     console.print(f"  [yellow]? Uncertain:[/yellow] {uncertain}")
     console.print(f"\n[dim]Total reviewed: {len(candidates)}[/dim]")
-    
+
+    # Show rejection breakdown by validation stage
+    if rejected > 0:
+        console.print("\n[bold]Rejection Breakdown:[/bold]")
+        data = store._load_data()
+        rejection_stages = {}
+        for hid, hyp in data.get("hypotheses", {}).items():
+            if hyp.get("status") == "rejected":
+                stage = hyp.get("rejection_stage", "Code Review")
+                pattern = hyp.get("rejection_pattern", "unknown")
+                key = f"{stage} ({pattern})"
+                rejection_stages[key] = rejection_stages.get(key, 0) + 1
+
+        for stage_pattern, count in sorted(rejection_stages.items(), key=lambda x: -x[1]):
+            console.print(f"  • {stage_pattern}: {count}")
+
     # Show confirmed vulnerabilities
     if confirmed > 0:
         console.print("\n[bold green]Confirmed Vulnerabilities:[/bold green]")
